@@ -1,0 +1,222 @@
+---
+title: "VISAbulliten"
+author: "Foster Thorburn"
+date: "2024-07-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r lib, warning=FALSE}
+library(readxl)
+library(tools)
+library(dplyr)
+library(plotly)
+library(lubridate)
+```
+
+```{r functions}
+## Code to retrieve file no matter name at directory location ##
+retFile <- function(dirPath) {
+  
+  # Get list of all files in the directory
+  files <- list.files(path = dirPath)
+  
+  # Check if there's only one file in the directory
+  if(length(files) == 1){
+    # Get the full file path
+    file_path <- file.path(dirPath, files[1])
+    
+    # Get the file extension
+    file_ext <- file_ext(files[1])
+    
+    # Depending on the file type, use the appropriate function to read the file
+    if(file_ext == "csv"){
+      df <- read.csv(file_path) # read as csv
+      return(df) # return from function
+    } else if(file_ext == "txt"){
+      df <- read.table(file_path) # read as text
+      return(df)
+    } else if(file_ext == "xlsx"){
+      df <- read_excel(file_path) # read as excel
+      return(df)
+    }
+    # Add more conditions here for other file types as needed
+  } else {
+    print("ERROR: More than one file in the directory or the directory is empty.")
+  }
+}
+
+# Function that returns last day of the month for date accepted
+last_day_of_month <- function(date) {
+  date <- as.Date(date)
+  return(date - day(date) + days_in_month(date))
+}
+```
+
+```{r import}
+
+filetype <- "csv" # Keeping track of what file type I'm using
+
+# reading .xlsx file into data frame
+df <- retFile("C:\\Users\\FosterThorburn\\OneDrive - Michigan Advocacy Program\\Documents\\R Scripts\\VISA Bulliten\\Data")
+
+# Cleaning date values or addding NA values
+if (filetype == "csv") {
+  # Replace blank values with NA in the entire data frame
+  df <- df %>% 
+    mutate_all(~na_if(., ""))
+} else if(filetype == "xlsx") {
+  # Replace "DateColumn" with the actual name of your date column, do this when you exported as an excel file
+  df$Date_MYY <- as.Date(df$DateColumn, origin = "1899-12-30")
+}
+```
+
+```{r cleaning}
+# Initialize an empty data frame
+new_df <- data.frame()
+
+# Initialize a variable to hold the month-year information
+month_year <- NA
+
+# Loop over the rows of the data frame
+for (i in 1:nrow(df)) {
+  # Check if the value in the first column of the current row is not NA
+  if (is.na(df[i, 1]) == FALSE) {
+    # Get the value in the first column of the current row
+    header <- df[i, 1]
+    
+    # Convert the value to a character and print it
+    #print(as.character(header))
+  } else {
+    df[i,"Date_MYY"] <- header # Add the month-year information to the row
+    
+    new_df <- rbind(new_df, df[i, ]) # Add the row to the new data frame
+  }
+}
+
+# Remove the rows with NA in the new data frame
+new_df <- new_df[complete.cases(new_df), ]
+
+# for simplicity sake, renaming data frames
+df <- new_df 
+rm(new_df)
+
+# making entries type date
+df[3:7] <- lapply(df[3:7], function(x) as.Date(x, format="%m/%d/%Y"))
+# NA values count as C at the moment
+
+# reformatting date column
+df$Date_MYY <- as.Date(paste0("01", df$Date_MYY), format="%d%b%y") # some NA's introduced here at lines 478-482
+
+# Extract the month and year
+df$Month <- format(df$Date_MYY, "%m")
+df$Year <- format(df$Date_MYY, "%Y")
+
+df <- df[, c("Month", "Year", setdiff(names(df), c("Month", "Year")))] # make 1st two cols
+
+df$Date_MYY <- last_day_of_month(df$Date_MYY) # Makes the date w/in the month posted to last day of month. this date can then be used to auto fill the 'C' or NA values with Date_MYY
+
+# a df showing 'TRUE' where NA values (C) are
+findC <- is.na(df)
+
+# Loop over each column in the data frame to replace NA values
+for (col_name in names(df)) {
+  # Replace NA values in the current column with corresponding values from Date_MYY
+  df[[col_name]][is.na(df[[col_name]])] <- df$Date_MYY[is.na(df[[col_name]])]
+}
+
+# use findC data frame to overlay C, when applicable, onto the plots that it's not apparent in
+# this can show what dates were current when they happened
+```
+
+Need to create a variable called FY, that tracks the fiscal year of each row
+
+test
+```{r}
+# Define the locations in a list
+locations <- names(df)[5:9]
+# [1] "All.Chargeability..Areas.Except.Those.Listed" "CHINA.mainland..born"                        
+# [3] "INDIA"                                        "MEXICO"                                      
+# [5] "PHILIPPINES" 
+
+# Split the data by Type
+df_split <- split(df, df$Family..Sponsored) 
+
+# Further split each group by Year
+df_split <- lapply(df_split, function(x) split(x, x$Year))
+
+fiscORcal <- "cal" # Initializing a var to track whether we're using fisc or cal years
+
+# Now you can iterate through each of the split data frames
+df_split <- lapply(df_split, function(group) {
+  lapply(group, function(subgroup) {
+    
+    # Iterate over each location
+    for (location in locations) {
+      
+      # If we are using Calendar years
+      if (fiscORcal == "cal") {
+        jan_date <- subgroup[[location]][subgroup$Month == "01"]
+        
+        # Check if jan_date is not empty
+        if (length(jan_date) > 0) {
+          # Calculate the difference in days between the jan date and the date of each row
+          subgroup[[paste0(location, "_movement")]] <- as.numeric(difftime(subgroup[[location]], 
+                                                                           jan_date, 
+                                                                           units = "days"))
+        } else {
+          # If jan_date is empty, set movement to NA
+          subgroup[[paste0(location, "_movement")]] <- NA
+        }
+      }
+      
+      # if we are using fiscal years
+      if (fiscORcal == "fisc") {
+        
+        # federal fiscal year runs from Oct-Aug of the next year, so start month is Oct
+        oct_date <- subgroup[[location]][subgroup$Month == "10"]
+        
+        # Check if oct_date is not empty
+        if (length(oct_date) > 0) {
+          # Calculate the difference in days between the smallest date and the date of each row
+          subgroup[[paste0(location, "_movement")]] <- as.numeric(difftime(subgroup[[location]], 
+                                                                           oct_date, 
+                                                                           units = "days"))
+        } else {
+          # If oct_date is empty, set movement to NA
+          subgroup[[paste0(location, "_movement")]] <- NA
+        }
+      }
+    }
+    
+    return(subgroup)
+  })
+})
+```
+
+```{r inspect dataframes}
+viewALL <- FALSE # bool to track whether i want to see all of the subgroups or not
+
+if (viewALL == TRUE) {
+  # Iterate over each group
+  for (group_name in names(df_split)) {
+    cat(paste0("Group: ", group_name, "\n"))
+    
+    # Iterate over each subgroup within the group
+    for (subgroup_name in names(df_split[[group_name]])) {
+      cat(paste0("  Subgroup: ", subgroup_name, "\n"))
+      
+      # Print the subgroup data frame
+      print(df_split[[group_name]][[subgroup_name]])
+    }
+  }
+}
+```
+
+```{r}
+
+```
+
